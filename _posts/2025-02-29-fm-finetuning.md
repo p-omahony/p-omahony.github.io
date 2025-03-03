@@ -65,6 +65,72 @@ While pretrained model weights have full rank for their original tasks, the LoRA
 So now our weight update is $$\Delta W = W_AW_B$$ with $$W \in \mathbf{R}^{m \times p}$$, $$W_A \in \mathbf{R}^{m \times r}$$ and $$W_B \in \mathbf{R}^{r \times p}$$; $$r$$ being the new rank.
 Typically, $$r$$ is predetermined before training and remains fixed, while the decomposition is learned during training.
 
+## Quantization
+
+<img src="../assets/images/fp16.png" alt="Float 16-Bit (FP16)" width="700em">
+
+The more bits we use to represent a value, the more precise it generally is:
+
+<img src="../assets/images/fp32.png" alt="Float 32-Bit (FP32)" width="700em">
+
+The more bits we have available, the larger the range of values that can be represented.
+The interval of representable numbers a given representation can take is called the dynamic range whereas the distance between two neighboring values is called precision:
+
+<img src="../assets/images/dynamic-range.png" alt="Dynamic range" width="700em">
+
+Since there are 8 bits in a byte of memory, we can compute how much memory a device needs to store a given value:
+
+$$memory=\frac{n_{bits}}{8}\times n_{params}$$
+
+So as we want, in our case, to finetune Llama-8B in FP-16 we need $$\frac{16}{8}\times8 \simeq 16 \text{ GB}$$ or $$\frac{32}{8}\times8 \simeq 32 \text{ GB}$$ to load the model. In practice, more things relate to the amount of (V)RAM you need during inference, like the context size and architecture.
+
+Therefore, minimizing the number of bits used to represent your model's parameters, both during storage and training, is highly desirable. However, reducing precision often leads to a decline in model accuracy.
+
+The goal is to lower the bit representation while preserving accuracy. This is where quantization plays a crucial role!
+
+### Common Data Types
+The main goal of quantization is to reduce the number of bits  needed to represent the original parameters while preserving the precision of the original parameters as best as possible.
+
+<img src="../assets/images/fp32-fp16.png" alt="Dynamic range" width="700em">
+
+<img src="../assets/images/fp32-bf16.png" alt="Dynamic range" width="700em">
+
+<img src="../assets/images/fp32-int8.png" alt="Dynamic range" width="700em">
+
+For each reduction in bits, a mapping is performed to “squeeze” the initial FP32 representations into lower bits.
+
+In practice, we do not need to map the entire FP32 range $$[-3.4\times 10^{38}, 3.4\times10^{38}]$$ into INT8. We merely need to find a way to map the range of our data (the model’s parameters) into INT8.
+
+Common squeezing/mapping methods are symmetric and asymmetric quantization and are forms of linear mapping.
+
+Let’s explore these methods to quantize from FP32 to INT8.
+
+### Symmetric Quantization
+
+In symmetric quantization, the range of the original floating-point values is mapped to a symmetric range around zero in the quantized space. In the previous examples, notice how the ranges before and after quantization remain centered around zero.
+
+A nice example of a form of symmetric quantization is called absolute maximum ($$absmax$$) quantization.
+
+Given a list of values, we take the highest absolute value $$\alpha$$ as the range to perform the linear mapping.
+
+<img src="../assets/images/absmax.png" alt="Dynamic range" width="700em">
+
+So in this case, to quantize an input $$\mathbb{x}$$, we compute:
+
+$$\mathbb{x}_{quantized} = \text{ round}(s \cdot \mathbb{x})$$
+
+where $$s$$ is the scaling factor such as $$s = \frac{2^{b-1}-1}{alpha}$$. $$b$$ is the number of bytes that we want to quantize to and $$\alpha$$ is the highest absolute value.
+
+To retrieve the original FP32 values, we can use the previously calculated scaling factor $$s$$ to dequantize the quantized values:
+
+$$\mathbb{x}_{dequantized} = \frac{\mathbb{x}_{quantized}}{s}$$
+
+Applying the quantization and then dequantization process to retrieve the original looks as follows:
+
+<img src="../assets/images/qdq.png" alt="Dynamic range" width="700em">
+
+You can see certain values, such as $$3.08$$ and $$3.02$$ being assigned to the INT8, namely $$36$$. When you dequantize the values to return to FP32, they lose some precision and are not distinguishable anymore. 
+
 ## Metrics
 
 ## Training
