@@ -65,71 +65,61 @@ While pretrained model weights have full rank for their original tasks, the LoRA
 So now our weight update is $$\Delta W = W_AW_B$$ with $$W \in \mathbf{R}^{m \times p}$$, $$W_A \in \mathbf{R}^{m \times r}$$ and $$W_B \in \mathbf{R}^{r \times p}$$; $$r$$ being the new rank.
 Typically, $$r$$ is predetermined before training and remains fixed, while the decomposition is learned during training.
 
-## Quantization
+## QLoRA
+QLoRA is an efficient finetuning method that enables training a 65B parameter model on a single 48GB GPU while retaining full 16-bit performance. It works by backpropagating gradients through a frozen, 4-bit quantized pretrained language model into Low Rank Adapters (LoRA). Key innovations include:
 
-<img src="../assets/images/fp16.png" alt="Float 16-Bit (FP16)" width="700em">
+ 1. 4-bit NormalFloat (NF4): An optimal data type for normally distributed weights.
+ 2. Double Quantization: Reduces memory footprint by quantizing the quantization constants.
+ 3. Paged Optimizers: Effectively manage memory spikes during training.
 
-The more bits we use to represent a value, the more precise it generally is:
+### Block-wise k-bit Quantization
 
-<img src="../assets/images/fp32.png" alt="Float 32-Bit (FP32)" width="700em">
+To understand the basics of quantization, I recommend this comprehensive article: [https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-quantization](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-quantization).
 
-The more bits we have available, the larger the range of values that can be represented.
-The interval of representable numbers a given representation can take is called the dynamic range whereas the distance between two neighboring values is called precision:
+Quantization is the process of discretizing an input from a representation that holds more information to a representation with less information. It often means
+taking a data type with more bits and converting it to fewer bits, for example from 32-bit floats to 8-bit Integers. To ensure that the entire range of the low-bit data type is used, the input data type is
+commonly rescaled into the target data type range through normalization by the absolute maximum of the input elements, which are usually structured as a tensor. For example, quantizing a 32-bit
+Floating Point (FP32) tensor into a Int8 tensor with range $$[−127, 127]$$:
 
-<img src="../assets/images/dynamic-range.png" alt="Dynamic range" width="700em">
+$$\mathbf{X}^{\text{Int8}} = \text{round}(\frac{127}{\text{absmax}(\mathbf{X}^{\text{FP32}})}\mathbf{X}^{\text{FP32}}) = \text{round}(c^{\text{FP32}}\cdot\mathbf{X}^{\text{FP32}})$$
 
-Since there are 8 bits in a byte of memory, we can compute how much memory a device needs to store a given value:
+where $$c$$ is the quantization constant.
 
-$$memory=\frac{n_{bits}}{8}\times n_{params}$$
+Dequantizaton is the inverse:
 
-So as we want, in our case, to finetune Llama-8B in FP-16 we need $$\frac{16}{8}\times8 \simeq 16 \text{ GB}$$ or $$\frac{32}{8}\times8 \simeq 32 \text{ GB}$$ to load the model. In practice, more things relate to the amount of (V)RAM you need during inference, like the context size and architecture.
+$$\text{dequant}(c^{\text{FP32}}, \mathbf{X}^{\text{Int8}}) = \frac{\mathbf{X}^{\text{Int8}}}{c^{\text{FP32}}} = \mathbf{X}^{FP32}$$
 
-Therefore, minimizing the number of bits used to represent your model's parameters, both during storage and training, is highly desirable. However, reducing precision often leads to a decline in model accuracy.
+The problem with this approach is that if a large magnitude value (i.e., an outlier) occurs in the input
+tensor, then the quantization bins—certain bit combinations—are not utilized well with few or no
+numbers quantized in some bins. When quantizing data, we just saw that we scale the entire tensor based on its largest absolute value. If that maximum is an outlier—a value much larger than the rest—it stretches the scale so that most of the other numbers fall into a very narrow range. This means that when the range is divided into bins (each representing a unique bit combination), many of those bins won't get any values because almost all the data is clustered in a few bins near zero. In essence, the outlier skews the distribution, leading to under-utilization of the available quantization levels and resulting in a loss of effective precision for the majority of the data.
+To prevent the outlier issue, a common approach is to chunk the
+input tensor into blocks that are independently quantized, each with their own quantization constant $$c$$.
+This can be formalized as follows: We chunk the input tensor $$\mathbf{X} \in \mathbb{R}^{b\times h}$$ into $$n$$ contiguous blocks of
+size $$B$$ by flattening the input tensor and slicing the linear segment into $$n = \frac{(b\times h)}{B}$$ blocks. We
+quantize these blocks independently to create a quantized tensor and $$n$$ quantization
+constants $$c_i$$.
 
-The goal is to lower the bit representation while preserving accuracy. This is where quantization plays a crucial role!
+### 4-bit NormalFLoat
 
-### Common Data Types
-The main goal of quantization is to reduce the number of bits  needed to represent the original parameters while preserving the precision of the original parameters as best as possible.
+The NormalFloat (NF) data type is built on Quantile Quantization. Unlike standard quantization (e.g., uniformly splitting a range into equal intervals), quantile quantization divides the data such that each bin receives approximately the same number of data points. This is achieved by using the empirical cumulative distribution function (CDF) of the tensor. Essentially, you determine the quantiles (or percentiles) of the data, and these quantiles then define the bin boundaries. This approach ensures that each bin is "evenly" populated, which is why it’s considered information-theoretically optimal—each bin carries roughly the same amount of information.
 
-<img src="../assets/images/fp32-fp16.png" alt="Dynamic range" width="700em">
+Since large pretrained neural network weights usually have a zero-centered normal distribution with
+standard deviation $$\sigma$$, we can transform all weights to a single fixed distribution by
+scaling $$\sigma$$ such that the distribution fits exactly into the range of our data type. For our data type, we
+set the arbitrary range $$[−1, 1]$$. As such, both the quantiles for the data type and the neural network
+weights need to be normalized into this range.
 
-<img src="../assets/images/fp32-bf16.png" alt="Dynamic range" width="700em">
+The information theoretically optimal data type for zero-mean normal distributions with arbitrary
+standard deviations $$\sigma$$ in the range $$[−1, 1]$$ is computed as follows:
+1. estimate the $$2k + 1$$ quantiles of a theoretical $$N (0, 1)$$ distribution to obtain a $$k$$-bit quantile quantization data type for normal distributions
+2. take this data type and normalize its values into the $$[−1, 1]$$ range
+3. quantize an input weight tensor by normalizing it into the $$[−1, 1]$$ range through absolute maximum rescaling.
 
-<img src="../assets/images/fp32-int8.png" alt="Dynamic range" width="700em">
+### Double Quantization
+We have seen that, to minimize information loss during quantization, it is optimal to use several quantization constants that better capture the range and distribution of the original data. However, these additional constants themselves require substantial memory. To address this issue, the principle of double quantization is introduced. Double quantization means that the quantization constants are quantized as well—essentially applying a second layer of quantization to compress these constants. This approach reduces the overall memory footprint while maintaining the fidelity of the quantization process, making it more suitable for memory-constrained environments.
 
-For each reduction in bits, a mapping is performed to “squeeze” the initial FP32 representations into lower bits.
-
-In practice, we do not need to map the entire FP32 range $$[-3.4\times 10^{38}, 3.4\times10^{38}]$$ into INT8. We merely need to find a way to map the range of our data (the model’s parameters) into INT8.
-
-Common squeezing/mapping methods are symmetric and asymmetric quantization and are forms of linear mapping.
-
-Let’s explore these methods to quantize from FP32 to INT8.
-
-### Symmetric Quantization
-
-In symmetric quantization, the range of the original floating-point values is mapped to a symmetric range around zero in the quantized space. In the previous examples, notice how the ranges before and after quantization remain centered around zero.
-
-A nice example of a form of symmetric quantization is called absolute maximum ($$absmax$$) quantization.
-
-Given a list of values, we take the highest absolute value $$\alpha$$ as the range to perform the linear mapping.
-
-<img src="../assets/images/absmax.png" alt="Dynamic range" width="700em">
-
-So in this case, to quantize an input $$\mathbb{x}$$, we compute:
-
-$$\mathbb{x}_{quantized} = \text{ round}(s \cdot \mathbb{x})$$
-
-where $$s$$ is the scaling factor such as $$s = \frac{2^{b-1}-1}{alpha}$$. $$b$$ is the number of bytes that we want to quantize to and $$\alpha$$ is the highest absolute value.
-
-To retrieve the original FP32 values, we can use the previously calculated scaling factor $$s$$ to dequantize the quantized values:
-
-$$\mathbb{x}_{dequantized} = \frac{\mathbb{x}_{quantized}}{s}$$
-
-Applying the quantization and then dequantization process to retrieve the original looks as follows:
-
-<img src="../assets/images/qdq.png" alt="Dynamic range" width="700em">
-
-You can see certain values, such as $$3.08$$ and $$3.02$$ being assigned to the INT8, namely $$36$$. When you dequantize the values to return to FP32, they lose some precision and are not distinguishable anymore. 
+### Paged Optimizers
+QLoRA is based on the NVIDIA unified memory feature that acts similarly to how an operating system handles memory paging between RAM and disk. When a GPU runs low on memory, this feature automatically transfers memory pages—sections of data—from the GPU to the CPU’s RAM, and then brings them back when they’re needed for operations like updating the optimizer. This automatic page-to-page transfer ensures that the GPU can continue processing without encountering out-of-memory errors, as it temporarily offloads less-critical data (in this case, the optimizer states) to the CPU. Essentially, it allows the system to handle memory shortages gracefully by dynamically managing where data is stored, much like traditional memory paging helps manage limited RAM by using disk space.
 
 ## Metrics
 
