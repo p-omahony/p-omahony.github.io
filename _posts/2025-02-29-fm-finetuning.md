@@ -111,7 +111,7 @@ weights need to be normalized into this range.
 
 The information theoretically optimal data type for zero-mean normal distributions with arbitrary
 standard deviations $$\sigma$$ in the range $$[−1, 1]$$ is computed as follows:
-1. estimate the $$2k + 1$$ quantiles of a theoretical $$N (0, 1)$$ distribution to obtain a $$k$$-bit quantile quantization data type for normal distributions
+1. estimate the $$2k + 1$$ quantiles of a theoretical $$\mathcal{N} (0, 1)$$ distribution to obtain a $$k$$-bit quantile quantization data type for normal distributions
 2. take this data type and normalize its values into the $$[−1, 1]$$ range
 3. quantize an input weight tensor by normalizing it into the $$[−1, 1]$$ range through absolute maximum rescaling.
 
