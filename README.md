@@ -25,6 +25,37 @@ Jekyll site. The following is a list of targets:
 To save you time, and also in case you lose some files while copying, we extract those files/configurations of the
 latest version of the **Chirpy** theme and the [CD][CD] workflow to here, so that you can start writing in minutes.
 
+## Local Development
+
+### Prerequisites
+
+This project requires Ruby >= 3.1. The system Ruby on macOS is too old, so use `rbenv`:
+
+```shell
+brew install rbenv ruby-build
+rbenv install 3.3.0
+rbenv local 3.3.0
+```
+
+Add rbenv to your shell config and reload it. For Fish:
+
+```fish
+# Add to ~/.config/fish/config.fish
+rbenv init - fish | source
+
+# Reload
+source ~/.config/fish/config.fish
+```
+
+### Serve locally
+
+```shell
+bundle install
+bundle exec jekyll serve
+```
+
+Then open `http://localhost:4000`.
+
 ## Usage
 
 Check out the [theme's docs](https://github.com/cotes2020/jekyll-theme-chirpy/wiki).
